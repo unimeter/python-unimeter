@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "unimeter-python"
+version = "0.1.0"
+description = "Python client for the Unimeter usage metering engine"
+readme = "README.md"
+license = "LicenseRef-OSaaSy"
+requires-python = ">=3.11"
+keywords = ["billing", "metering", "usage"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://unimeter.io"
+Repository = "https://github.com/unimeter/python-unimeter"
+Documentation = "https://unimeter.io/sdk/python/"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/unimeter"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
