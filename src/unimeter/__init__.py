@@ -1,6 +1,6 @@
 """Unimeter Python SDK — async client for the Unimeter usage metering engine."""
 
-from .client import AsyncClient
+from .client import AsyncClient, Subscription
 from .errors import (
     AlreadyExistsError,
     BackpressureError,
@@ -35,6 +35,7 @@ from .types import (
 
 __all__ = [
     "AsyncClient",
+    "Subscription",
     "Event",
     "IngestResult",
     "AggValue",

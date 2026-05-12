@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 from . import protocol as proto
@@ -117,17 +117,192 @@ class MetricsClient:
         return schemas
 
 
+class Subscription:
+    """An active alert subscription. Iterate with ``async for`` until
+    ``close()`` is called.
+
+    Mirrors the Go SDK's ``alerts.Subscription``: live server pushes plus
+    per-node catchup via ``list_alerts``, filtered by account and metric,
+    with per-node last-seen offsets the caller can persist across restarts.
+    """
+
+    def __init__(
+        self,
+        account_ids: set[int],
+        metric_codes: set[str],
+        offsets: dict[str, int],
+        buffer_size: int,
+    ):
+        self._account_ids = account_ids
+        self._metric_codes = metric_codes
+        self._offsets: dict[str, int] = dict(offsets)
+        self._queue: asyncio.Queue[AlertRecord | None] = asyncio.Queue(maxsize=buffer_size)
+        self._dropped = 0
+        self._closed = False
+        self._catchup_tasks: list[asyncio.Task] = []
+
+    def __aiter__(self) -> "Subscription":
+        return self
+
+    async def __anext__(self) -> AlertRecord:
+        if self._closed and self._queue.empty():
+            raise StopAsyncIteration
+        item = await self._queue.get()
+        if item is None:
+            raise StopAsyncIteration
+        return item
+
+    def offsets(self) -> dict[str, int]:
+        """Snapshot of last-seen log offsets per node. Persist these to
+        durable storage so the next process start can resume catchup
+        without reprocessing alerts.
+        """
+        return dict(self._offsets)
+
+    def dropped(self) -> int:
+        """Number of alerts that could not be delivered because the
+        consumer was too slow. Should stay at zero in a healthy system.
+        """
+        return self._dropped
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        for t in self._catchup_tasks:
+            t.cancel()
+        # Wake any pending __anext__ waiters with the sentinel.
+        try:
+            self._queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+    def _match(self, account_id: int, metric_code: str) -> bool:
+        if self._account_ids and account_id not in self._account_ids:
+            return False
+        if self._metric_codes and metric_code not in self._metric_codes:
+            return False
+        return True
+
+    def _deliver(self, record: AlertRecord) -> None:
+        """Apply filter, deliver to queue, advance per-node offset."""
+        # Advance offset unconditionally so filtered-out records aren't
+        # replayed on reconnect.
+        next_offset = record.log_offset + 1
+        if next_offset > self._offsets.get(record.node_addr, 0):
+            self._offsets[record.node_addr] = next_offset
+
+        if not self._match(record.account_id, record.metric_code):
+            return
+
+        try:
+            self._queue.put_nowait(record)
+        except asyncio.QueueFull:
+            self._dropped += 1
+
+
 class AlertsClient:
     def __init__(self, pool: ConnectionPool, router: Router):
         self._pool = pool
         self._router = router
+        self._active: Subscription | None = None
 
     async def subscribe(
         self,
+        *,
         account_ids: list[int] | None = None,
+        metric_codes: list[str] | None = None,
         since_offset: dict[str, int] | None = None,
-    ) -> AsyncIterator[AlertRecord]:
-        raise NotImplementedError("alert subscriptions not yet implemented in Python SDK")
+        buffer_size: int = 64,
+    ) -> Subscription:
+        """Open a subscription. Enables push on every known node, kicks
+        off per-node catchup from the supplied offsets, and returns a
+        ``Subscription`` you can iterate with ``async for``.
+
+        Catchup is only run for the accounts listed in ``account_ids``;
+        the underlying ``list_alerts`` server API is per-account. To
+        subscribe to all accounts, pass ``account_ids=None`` — live push
+        will deliver everything but catchup is skipped (matches the Go
+        SDK behaviour).
+        """
+        sub = Subscription(
+            account_ids=set(account_ids or ()),
+            metric_codes=set(metric_codes or ()),
+            offsets=since_offset or {},
+            buffer_size=buffer_size,
+        )
+
+        # Wire the pool's broadcast handler to this subscription.
+        def on_broadcast(node_addr: str, packet_type: int, payload: bytes) -> None:
+            if packet_type != int(proto.PacketType.ALERT_PUSH):
+                return
+            if len(payload) < proto.ALERT_PUSH_PAYLOAD_SIZE:
+                return
+            node_id, log_offset, account_id, metric, threshold, value, ts_ns = (
+                proto.decode_alert_push(payload)
+            )
+            sub._deliver(AlertRecord(
+                node_addr=node_addr,
+                log_offset=log_offset,
+                account_id=account_id,
+                metric_code=metric,
+                threshold_code=threshold,
+                value_at_cross=value,
+                triggered_at=datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc),
+            ))
+
+        self._pool.set_broadcast_handler(on_broadcast)
+        self._active = sub
+
+        # Enable push on every known node, best-effort.
+        addrs = self._router.nodes()
+        for addr in addrs:
+            try:
+                await self._pool.send(
+                    addr, proto.PacketType.ALERT_PUSH_ENABLE, proto.encode_alert_push_enable(),
+                )
+            except Exception as e:
+                logger.debug("alert push enable failed for %s: %s", addr, e)
+
+        # Catchup per (node × account) in parallel.
+        if account_ids:
+            for addr in addrs:
+                for acc in account_ids:
+                    since = sub._offsets.get(addr, 0)
+                    sub._catchup_tasks.append(asyncio.create_task(
+                        self._catchup_one(sub, addr, acc, since),
+                    ))
+
+        return sub
+
+    async def _catchup_one(
+        self, sub: Subscription, node_addr: str, account_id: int, since: int,
+    ) -> None:
+        try:
+            payload = proto.encode_alerts_list(account_id, since)
+            status, resp = await self._pool.send(
+                node_addr, proto.PacketType.ALERTS_LIST, payload,
+            )
+            if status != proto.StatusCode.OK:
+                return
+            for log_offset, acc, metric, threshold, value, ts_ns in (
+                proto.decode_alerts_list_response(resp)
+            ):
+                if log_offset < since:
+                    continue
+                sub._deliver(AlertRecord(
+                    node_addr=node_addr,
+                    log_offset=log_offset,
+                    account_id=acc,
+                    metric_code=metric,
+                    threshold_code=threshold,
+                    value_at_cross=value,
+                    triggered_at=datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc),
+                ))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug("catchup failed for %s/%d: %s", node_addr, account_id, e)
 
 
 class AsyncClient:
@@ -295,4 +470,16 @@ class AsyncClient:
         status, resp = await self._pool.send(addr, proto.PacketType.ALERTS_LIST, payload)
         _check_status(status, resp)
         records = []
+        for log_offset, acc, metric, threshold, value, ts_ns in (
+            proto.decode_alerts_list_response(resp)
+        ):
+            records.append(AlertRecord(
+                node_addr=addr,
+                log_offset=log_offset,
+                account_id=acc,
+                metric_code=metric,
+                threshold_code=threshold,
+                value_at_cross=value,
+                triggered_at=datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc),
+            ))
         return records

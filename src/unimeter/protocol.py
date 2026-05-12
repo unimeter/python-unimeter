@@ -219,13 +219,63 @@ def encode_events_list(account_id: int, since_ns: int, until_ns: int) -> bytes:
     return _EVENTS_LIST_REQ.pack(account_id, since_ns, until_ns)
 
 
-# ---- Alerts list ----
+# ---- Alerts list / push ----
 
 _ALERTS_LIST_REQ = struct.Struct("<Q Q")  # account_id, since_offset
 
 
 def encode_alerts_list(account_id: int, since_offset: int) -> bytes:
     return _ALERTS_LIST_REQ.pack(account_id, since_offset)
+
+
+# AlertRecordWire layout (must match Zig wire format and Go SDK):
+#   Offset(u64) + AccountID(u64) + MetricCode[64] + ThresholdCode[32]
+#   + ValueAtCross(u64) + TriggeredAt(i64) + _pad[8]  = 136 bytes
+_ALERT_RECORD_WIRE = struct.Struct("<Q Q 64s 32s Q q 8x")
+ALERT_RECORD_WIRE_SIZE = 136
+
+# AlertPushPayload = AlertRecordWire(136) + NodeID(u8) + _pad[7] = 144 bytes
+ALERT_PUSH_PAYLOAD_SIZE = ALERT_RECORD_WIRE_SIZE + 8
+
+
+def _null_str(b: bytes) -> str:
+    return b.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+
+
+def decode_alert_record(buf: bytes, offset: int = 0) -> tuple[int, int, str, str, int, int]:
+    """Decode one AlertRecordWire entry.
+
+    Returns (log_offset, account_id, metric_code, threshold_code,
+    value_at_cross, triggered_at_ns).
+    """
+    log_offset, account_id, mc, tc, vac, tat = _ALERT_RECORD_WIRE.unpack_from(buf, offset)
+    return log_offset, account_id, _null_str(mc), _null_str(tc), vac, tat
+
+
+def decode_alerts_list_response(payload: bytes) -> list[tuple[int, int, str, str, int, int]]:
+    """Decode an ALERTS_LIST response into a list of records."""
+    records = []
+    off = 0
+    while off + ALERT_RECORD_WIRE_SIZE <= len(payload):
+        records.append(decode_alert_record(payload, off))
+        off += ALERT_RECORD_WIRE_SIZE
+    return records
+
+
+def decode_alert_push(payload: bytes) -> tuple[int, int, int, str, str, int, int]:
+    """Decode an ALERT_PUSH broadcast payload (144 bytes).
+
+    Returns (node_id, log_offset, account_id, metric_code,
+    threshold_code, value_at_cross, triggered_at_ns).
+    """
+    rec = decode_alert_record(payload, 0)
+    node_id = payload[ALERT_RECORD_WIRE_SIZE]
+    return (node_id, *rec)
+
+
+def encode_alert_push_enable() -> bytes:
+    """ALERT_PUSH_ENABLE has an empty payload — header alone."""
+    return b""
 
 
 # ---- Partition map ----

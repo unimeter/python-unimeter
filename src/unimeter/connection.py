@@ -30,6 +30,7 @@ class Connection:
         self._read_task: Optional[asyncio.Task] = None
         self._write_lock = asyncio.Lock()
         self._connected = False
+        # Broadcast handler signature: (packet_type_byte: int, payload: bytes)
         self.on_broadcast: Optional[Callable[[int, bytes], None]] = None
 
     @property
@@ -95,18 +96,27 @@ class Connection:
         try:
             while self._connected and self._reader:
                 header_data = await self._reader.readexactly(proto.RESPONSE_HEADER_SIZE)
-                status, request_id, payload_len = proto.decode_response_header(header_data)
+                # Parse manually: the first byte is StatusCode for normal
+                # responses, but for broadcasts (request_id == 0) the server
+                # overloads it as a PacketType tag (e.g. 0x35 = ALERT_PUSH).
+                # Coercing 0x35 to StatusCode would raise ValueError, so we
+                # branch on request_id first.
+                status_byte = header_data[0]
+                request_id = struct.unpack_from("<I", header_data, 4)[0]
+                payload_len = struct.unpack_from("<I", header_data, 8)[0]
 
                 payload = b""
                 if payload_len > 0:
                     payload = await self._reader.readexactly(payload_len)
 
                 if request_id == 0:
-                    # Server broadcast.
+                    # Server broadcast — status_byte carries the broadcast
+                    # packet type (alert_push, partition_map_update, …).
                     if self.on_broadcast:
-                        self.on_broadcast(status, payload)
+                        self.on_broadcast(status_byte, payload)
                     continue
 
+                status = proto.StatusCode(status_byte)
                 fut = self._pending.pop(request_id, None)
                 if fut and not fut.done():
                     fut.set_result((status, payload))

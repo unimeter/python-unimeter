@@ -40,6 +40,17 @@ class Router:
             return r0
         return self._map[p][0]
 
+    def nodes(self) -> list[str]:
+        """All unique node addresses across leaders and replicas."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for leader, r0, r1 in self._map:
+            for addr in (leader, r0, r1):
+                if addr and addr not in seen:
+                    seen.add(addr)
+                    out.append(addr)
+        return out
+
     def update_partition(self, partition_id: int, new_leader: str) -> None:
         old = self._map[partition_id]
         self._map[partition_id] = (new_leader, old[1], old[2])
