@@ -36,6 +36,7 @@ class PacketType(IntEnum):
     ALERTS_LIST = 0x33
     ALERT_PUSH_ENABLE = 0x34
     ALERT_PUSH = 0x35
+    USAGE_QUERY_BREAKDOWN = 0x36
     CLUSTER_STATUS = 0x40
     CLUSTER_REBALANCE = 0x41
 
@@ -208,6 +209,69 @@ def decode_agg_value(data: bytes) -> tuple[int, int, int, int, int, int]:
     sum_lo, sum_hi, count, max_val, last_value, last_ts, alert_flags = _AGG_VALUE.unpack_from(data)
     total_sum = (sum_hi << 64) | sum_lo
     return total_sum, count, max_val, last_value, last_ts, alert_flags
+
+
+# ---- Breakdown query ----
+
+# Wire layout:
+#   account_id:u64 + period_start:i64 + period_end:i64
+#   + metric_code:[64]u8 + group_by_count:u8 + _pad:[7]u8
+#   + group_by_keys: group_by_count × [32]u8
+_BREAKDOWN_BASE = struct.Struct("<Q q q 64s B 7x")
+
+
+def encode_usage_query_breakdown(
+    account_id: int,
+    metric_code: str,
+    period_start_ns: int,
+    period_end_ns: int,
+    group_by: list[str],
+) -> bytes:
+    if not group_by:
+        raise ValueError("group_by must list at least one dimension key")
+    if len(group_by) > 4:
+        raise ValueError("group_by may not exceed 4 keys (MAX_FILTERS)")
+    mc = metric_code.encode("utf-8")[:63].ljust(64, b"\x00")
+    parts = [_BREAKDOWN_BASE.pack(
+        account_id, period_start_ns, period_end_ns, mc, len(group_by),
+    )]
+    for key in group_by:
+        parts.append(key.encode("utf-8")[:31].ljust(32, b"\x00"))
+    return b"".join(parts)
+
+
+BREAKDOWN_ENTRY_WIRE_SIZE = 320
+
+# Layout per entry (matches BreakdownEntryWire in protocol.zig):
+#   dims_count:u8 + _pad:[7]u8 + dim_keys:[4][32] + dim_values:[4][32]
+#   + sum_lo:u64 + sum_hi:u64 + count:u64 + max:u64
+#   + last_value:u64 + last_ts:i64 + alert_flags:u64
+_BREAKDOWN_ENTRY = struct.Struct("<B 7x 128s 128s Q Q Q Q Q q Q")
+
+
+def decode_usage_query_breakdown_response(
+    payload: bytes,
+) -> list[tuple[list[tuple[str, str]], int, int, int, int, int, int]]:
+    """Decode a USAGE_QUERY_BREAKDOWN response.
+
+    Returns a list of (dims, sum, count, max, last_value, last_ts, alert_flags)
+    where dims is the list of (key, value) pairs identifying the cell.
+    """
+    out = []
+    off = 0
+    while off + BREAKDOWN_ENTRY_WIRE_SIZE <= len(payload):
+        (dims_count, keys_blob, values_blob,
+         sum_lo, sum_hi, count, max_val,
+         last_value, last_ts, alert_flags) = _BREAKDOWN_ENTRY.unpack_from(payload, off)
+        dims: list[tuple[str, str]] = []
+        for i in range(dims_count):
+            k = _null_str(keys_blob[i * 32:(i + 1) * 32])
+            v = _null_str(values_blob[i * 32:(i + 1) * 32])
+            dims.append((k, v))
+        total_sum = (sum_hi << 64) | sum_lo
+        out.append((dims, total_sum, count, max_val, last_value, last_ts, alert_flags))
+        off += BREAKDOWN_ENTRY_WIRE_SIZE
+    return out
 
 
 # ---- Events list ----

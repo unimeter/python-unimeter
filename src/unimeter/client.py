@@ -431,6 +431,49 @@ class AsyncClient:
             )
         return UsageResult(value=AggValue())
 
+    async def query_breakdown(
+        self,
+        account_id: int,
+        metric_code: str,
+        period: Period,
+        *,
+        group_by: list[str],
+    ) -> dict[frozenset[tuple[str, str]], AggValue]:
+        """Return per-dimension aggregates in one round trip.
+
+        Server enumerates the cartesian product of `group_by` dimension
+        values (from the metric schema) and returns one entry per
+        non-empty cell. The result key is a frozenset of (key, value)
+        pairs identifying the cell.
+        """
+        start_ns = int(period.start.timestamp() * 1_000_000_000)
+        end_ns = int(period.end.timestamp() * 1_000_000_000)
+        payload = proto.encode_usage_query_breakdown(
+            account_id, metric_code, start_ns, end_ns, group_by,
+        )
+
+        addr = self._router.replica_for(account_id)
+        status, resp = await self._pool.send(
+            addr, proto.PacketType.USAGE_QUERY_BREAKDOWN, payload,
+        )
+        if status == proto.StatusCode.REDIRECT:
+            new_addr = resp.split(b"\x00")[0].decode("utf-8")
+            status, resp = await self._pool.send(
+                new_addr, proto.PacketType.USAGE_QUERY_BREAKDOWN, payload,
+            )
+        _check_status(status, resp)
+
+        out: dict[frozenset[tuple[str, str]], AggValue] = {}
+        for dims, total_sum, count, max_val, last_value, last_ts, alert_flags in (
+            proto.decode_usage_query_breakdown_response(resp)
+        ):
+            out[frozenset(dims)] = AggValue(
+                sum=total_sum, count=count, max=max_val,
+                last_value=last_value, last_timestamp=last_ts,
+                alert_flags=alert_flags,
+            )
+        return out
+
     async def query_realtime(self, account_id: int, metric_code: str) -> AggValue:
         payload = proto.encode_usage_realtime(account_id, metric_code)
         addr = self._router.leader_for(account_id)
