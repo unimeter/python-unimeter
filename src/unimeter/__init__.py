@@ -29,6 +29,8 @@ from .types import (
     current_month,
     last_billing_period,
     last_month,
+    today_utc,
+    yesterday_utc,
     scale,
     unscale,
 )
@@ -54,6 +56,8 @@ __all__ = [
     "last_month",
     "current_billing_period",
     "last_billing_period",
+    "today_utc",
+    "yesterday_utc",
     "scale",
     "unscale",
     "UnimeterError",

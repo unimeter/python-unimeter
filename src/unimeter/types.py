@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 SCALE = 1_000_000
@@ -40,6 +40,7 @@ class AggType(enum.IntEnum):
 class PeriodType(enum.IntEnum):
     FIXED = 0
     CALENDAR = 1
+    DAY = 2
 
 
 @dataclass
@@ -149,6 +150,20 @@ def current_billing_period(cycle_day: int = 1) -> Period:
         start = now.replace(year=py, month=pm, day=cycle_day, hour=0, minute=0, second=0, microsecond=0)
         end = now.replace(day=cycle_day, hour=0, minute=0, second=0, microsecond=0)
     return Period(start=start, end=end)
+
+
+def today_utc() -> Period:
+    """Current UTC day window — matches PeriodType.DAY buckets."""
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return Period(start=start, end=end)
+
+
+def yesterday_utc() -> Period:
+    """Previous UTC day window."""
+    today = today_utc()
+    return Period(start=today.start - timedelta(days=1), end=today.start)
 
 
 def last_billing_period(cycle_day: int = 1) -> Period:
