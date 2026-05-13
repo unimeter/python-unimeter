@@ -41,6 +41,7 @@ class PeriodType(enum.IntEnum):
     FIXED = 0
     CALENDAR = 1
     DAY = 2
+    WEEK = 3
 
 
 @dataclass
@@ -164,6 +165,23 @@ def yesterday_utc() -> Period:
     """Previous UTC day window."""
     today = today_utc()
     return Period(start=today.start - timedelta(days=1), end=today.start)
+
+
+def this_week_utc() -> Period:
+    """Current ISO week — Monday 00:00 UTC → next Monday 00:00 UTC.
+    Matches PeriodType.WEEK buckets.
+    """
+    now = datetime.now(timezone.utc)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = midnight - timedelta(days=midnight.weekday())  # weekday: Mon=0
+    end = start + timedelta(days=7)
+    return Period(start=start, end=end)
+
+
+def last_week_utc() -> Period:
+    """Previous ISO week window."""
+    this_week = this_week_utc()
+    return Period(start=this_week.start - timedelta(days=7), end=this_week.start)
 
 
 def last_billing_period(cycle_day: int = 1) -> Period:

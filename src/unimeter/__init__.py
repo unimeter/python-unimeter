@@ -31,6 +31,8 @@ from .types import (
     last_month,
     today_utc,
     yesterday_utc,
+    this_week_utc,
+    last_week_utc,
     scale,
     unscale,
 )
@@ -58,6 +60,8 @@ __all__ = [
     "last_billing_period",
     "today_utc",
     "yesterday_utc",
+    "this_week_utc",
+    "last_week_utc",
     "scale",
     "unscale",
     "UnimeterError",
