@@ -197,7 +197,16 @@ unscale(1_500_000) # 1.5
 
 ## Examples
 
-Working examples are in [unimeter/examples](https://github.com/unimeter/examples).
+Working examples are in [unimeter/examples](https://github.com/unimeter/examples):
+
+| Example | Demonstrates |
+|---------|-------------|
+| `python/saas-api.py` | Per-request counter, monthly query |
+| `python/infra-metering.py` | SUM with provider/region filters |
+| `python/seat-based.py` | COUNT UNIQUE active seats, entitlement gate |
+| `python/high-throughput.py` | Buffered async ingest |
+| `python/free-tier-alerts.py` | Alert thresholds and enforcement |
+| `python/stripe-integration.py` | Stripe webhook simulation → invoice |
 
 ---
 
